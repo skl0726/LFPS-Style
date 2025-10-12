@@ -1,6 +1,10 @@
 # Content Preservation by Low-frequency Phase Swapping in Diffusion-based Style Transfer
 🧠 **\* Research in Progress \***
 
+## Model Diagram
+<img src="./asset/low_frequency_phase_swapping_diagram.png">
+
+## hello2
 <br/>
 <figure>
     <a href="link"><img src="./asset/original.png" width="32%"></a>
