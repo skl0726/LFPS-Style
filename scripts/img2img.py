@@ -330,7 +330,7 @@ def main():
                         )
 
                         # z_enc = adain(z_enc_content, z_enc_style)
-                        # z_enc = z_enc_content
+                        z_enc = z_enc_content
 
                         # noised latents visualize
                         # ddim_inversion_path = "_outputs/ddim_inversion"
@@ -400,7 +400,7 @@ if __name__ == "__main__":
 
 
 """
-CUDA_VISIBLE_DEVICES=0 python scripts/img2img.py --prompt "Monochrome Sketching" --init-img "_data/cnt/woman.png" --sty-img "_data/sty/sty4.png" --outdir "_outputs/" --strength 0.8
+CUDA_VISIBLE_DEVICES=0 python scripts/img2img.py --prompt "Monochrome Sketching" --init-img "_data/cnt/woman.png" --outdir "_outputs/" --strength 0.8
 
 - style keyword: Pixel, Van Gogh Style, Monochrome Sketching, Cyberpunk, Chinese Ink, Oil Panting, Studio Ghibli, Crayon Painting, LEGO Toy
 """

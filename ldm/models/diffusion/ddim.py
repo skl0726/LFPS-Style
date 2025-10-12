@@ -405,7 +405,7 @@ class DDIMSampler(object):
             target_fft_shift = torch.fft.fftshift(target_fft, dim=(-2, -1))
 
             B, C, H, W = source_latent.shape
-            cutoff_ratio = 0.4
+            cutoff_ratio = 0.0
 
             # circular mask
             y, x = torch.meshgrid(
