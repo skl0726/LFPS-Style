@@ -14,17 +14,17 @@ The left image is the original, the center image shows the result with a text pr
 
 - LDM text prompt: **"Oil Panting"**
 <figure>
-    <a href="link"><img src="./asset/original.png" width="32%"></a>
-    <a href="link"><img src="./asset/LDM_text_only(Oil_Panting).png" width="32%"></a>
-    <a href="link"><img src="./asset/phase_swapping(Oil_Panting).png" width="32%"></a>
+    <a href="link"><img src="./asset/original.png" width="30%"></a>
+    <a href="link"><img src="./asset/LDM_text_only(Oil_Panting).png" width="30%"></a>
+    <a href="link"><img src="./asset/phase_swapping(Oil_Panting).png" width="40%"></a>
 </figure>
 <br/><br/>
 
 - LDM text prompt: **"Monochrome Sketching"**
 <figure>
-    <a href="link"><img src="./asset/original.png" width="32%"></a>
-    <a href="link"><img src="./asset/LDM_text_only(Monochrome_Sketching).png" width="32%"></a>
-    <a href="link"><img src="./asset/phase_swapping(Monochrome_Sketching).png" width="32%"></a>
+    <a href="link"><img src="./asset/original.png" width="30%"></a>
+    <a href="link"><img src="./asset/LDM_text_only(Monochrome_Sketching).png" width="30%"></a>
+    <a href="link"><img src="./asset/phase_swapping(Monochrome_Sketching).png" width="40%"></a>
 </figure>
 <br/>
 
