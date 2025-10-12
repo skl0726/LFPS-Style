@@ -1,0 +1,8 @@
+__pycache__
+latent_diffusion.egg-info
+_data/
+_outputs/
+
+# model parameters
+models/ldm/stable-diffusion-v1/model.ckpt
+models/clip/clip-vit-large-patch14

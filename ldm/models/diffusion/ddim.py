@@ -5,6 +5,10 @@ import numpy as np
 from tqdm import tqdm
 from functools import partial
 
+import os
+from einops import rearrange
+from PIL import Image
+
 from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps, noise_like, \
     extract_into_tensor
 
@@ -220,6 +224,120 @@ class DDIMSampler(object):
                 extract_into_tensor(sqrt_one_minus_alphas_cumprod, t, x0.shape) * noise)
 
     @torch.no_grad()
+    def ddim_inversion(self, x_latent, cond=None, t_start=0,
+                       unconditional_guidance_scale=1.0, unconditional_conditioning=None,
+                       use_original_steps=False, verbose=True):
+        """
+        Deterministic DDIM forward: starting from x_0 (latent), run forward-DDIM steps
+        to obtain x_t (the 'noised' latent). This is a deterministic 'inversion' path
+        following the DDIM equations (eta=0 style).
+
+        Args:
+            x_latent: (b, C, H, W) tensor, the latent of the input image (z0).
+            cond: conditioning for model (text embeddings etc.), same as decode() uses.
+            t_start: int, number of DDIM steps to run (this mirrors how img2img maps strength -> t_enc).
+            unconditional_guidance_scale: guidance scale (for classifier-free guidance).
+            unconditional_conditioning: unconditional conditioning (empty prompts).
+            use_original_steps: whether to use original ddpm steps or the ddim_timesteps.
+        Returns:
+            x_enc: tensor, the latent after forward-DDIM (z_t).
+        """
+        device = x_latent.device
+        timesteps = np.arange(self.ddpm_num_timesteps) if use_original_steps else self.ddim_timesteps
+        t_start = int(t_start)
+        if t_start <= 0:
+            return x_latent
+        if t_start > timesteps.shape[0]:
+            if verbose:
+                print(f"Warning: t_start ({t_start}) > available ddim timesteps ({timesteps.shape[0]}). Clamping.")
+            t_start = timesteps.shape[0]
+
+        # use the first t_start timesteps in ascending order to step forward
+        forward_timesteps = timesteps[:t_start]
+        total_steps = forward_timesteps.shape[0]
+        if verbose:
+            print(f"Running DDIM inversion/encoding with {total_steps} forward timesteps")
+
+        noised_latents = []
+        x_enc = x_latent
+        b = x_latent.shape[0]
+
+        # For indexing into precomputed buffers (ddim_alphas, etc.), we map each timestep value
+        # to its index inside self.ddim_timesteps.
+        # Note: self.ddim_timesteps is typically the same as `timesteps` used above when use_original_steps=False
+        # so indices will be 0..N-1; this mapping is robust in either case.
+        # Convert to python list for iteration
+        steps_list = list(forward_timesteps)
+
+        # build a mapping from timestep value -> index in buffers (int)
+        # If self.ddim_timesteps is numpy array, use np.where; fall back to matching by position.
+        try:
+            base_timesteps = list(self.ddim_timesteps)
+        except Exception:
+            base_timesteps = list(forward_timesteps)
+
+        idx_map = {}
+        for idx, tv in enumerate(base_timesteps):
+            idx_map[int(tv)] = idx
+
+        for i, step in enumerate(forward_timesteps):
+            step_i = int(step)
+            index = idx_map.get(step_i, None)
+            if index is None:
+                # fallback: use i
+                index = i
+
+            ts = torch.full((b,), step_i, device=device, dtype=torch.long)
+
+            # predict e_t (with classifier-free guidance if applicable)
+            if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
+                e_t = self.model.apply_model(x_enc, ts, cond)
+            else:
+                x_in = torch.cat([x_enc] * 2)
+                t_in = torch.cat([ts] * 2)
+                c_in = torch.cat([unconditional_conditioning, cond])
+                e_t_uncond, e_t = self.model.apply_model(x_in, t_in, c_in).chunk(2)
+                e_t = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
+
+            # compute pred_x0 (same formula as in p_sample_ddim)
+            # gather alpha_t and sqrt(1-alpha_t) using index mapping
+            a_t = self.ddim_alphas[index]                # alpha_t (tensor scalar)
+            sqrt_one_minus_at = self.ddim_sqrt_one_minus_alphas[index]  # sqrt(1-alpha_t)
+            # expand to match batch/shape
+            a_t_sqrt = torch.sqrt(a_t).to(device)
+            # ensure shapes broadcast
+            a_t_sqrt = a_t_sqrt.view(1, 1, 1, 1)
+            sqrt_one_minus_at = torch.tensor(sqrt_one_minus_at, device=device).view(1, 1, 1, 1)
+
+            pred_x0 = (x_enc - sqrt_one_minus_at * e_t) / a_t_sqrt
+
+            # determine alpha_{t_next} (index_next)
+            # find next index in base_timesteps: pick index_next corresponding to next forward timestep value,
+            # if exists; otherwise fallback to current index (safety).
+            if i + 1 < total_steps:
+                next_step = int(forward_timesteps[i + 1])
+                index_next = idx_map.get(next_step, index + 1 if (index + 1) < len(self.ddim_alphas) else index)
+            else:
+                # compute index_next as index+1 if possible; if not, just reuse index
+                index_next = index + 1 if (index + 1) < len(self.ddim_alphas) else index
+
+            a_next = self.ddim_alphas[index_next]
+            sqrt_one_minus_anext = self.ddim_sqrt_one_minus_alphas[index_next]
+
+            # build x_next using deterministic DDIM step (eta=0)
+            a_next_sqrt = torch.sqrt(a_next).to(device).view(1, 1, 1, 1)
+            sqrt_one_minus_anext = torch.tensor(sqrt_one_minus_anext, device=device).view(1, 1, 1, 1)
+
+            x_next = a_next_sqrt * pred_x0 + sqrt_one_minus_anext * e_t
+
+            noised_latents.append(x_enc.detach())
+            x_enc = x_next
+
+        noised_latents.reverse()
+        return x_enc, noised_latents
+
+
+    @torch.no_grad()
     def decode(self, x_latent, cond, t_start, unconditional_guidance_scale=1.0, unconditional_conditioning=None,
                use_original_steps=False):
 
@@ -239,3 +357,91 @@ class DDIMSampler(object):
                                           unconditional_guidance_scale=unconditional_guidance_scale,
                                           unconditional_conditioning=unconditional_conditioning)
         return x_dec
+
+
+    @torch.no_grad()
+    def decode_with_fourier(self,
+                            source_latent,
+                            source_cond,
+                            source_unconditional_guidance_scale,
+                            source_unconditional_conditioning,
+                            noised_latents,
+                            t_start,
+                            # target_latent=None,
+                            # target_cond=None,
+                            # target_unconditional_guidance_scale=None,
+                            # target_unconditional_conditioning=None,
+                            use_original_steps=False):
+        timesteps = np.arange(self.ddpm_num_timesteps) if use_original_steps else self.ddim_timesteps
+        timesteps = timesteps[:t_start]
+
+        time_range = np.flip(timesteps)
+        total_steps = timesteps.shape[0]
+        print(f"Running DDIM Sampling with {total_steps} timesteps")
+
+        iterator = tqdm(time_range, desc='Decoding image', total=total_steps)
+
+        source_dec = source_latent
+        # target_dec = target_latent
+
+        for i, (step, noised_latent) in enumerate(zip(iterator, noised_latents)):
+            index = total_steps - i - 1
+
+            source_ts = torch.full((source_latent.shape[0],), step, device=source_latent.device, dtype=torch.long)
+            source_dec, _ = self.p_sample_ddim(source_dec, source_cond, source_ts, index=index, use_original_steps=use_original_steps,
+                                               unconditional_guidance_scale=source_unconditional_guidance_scale,
+                                               unconditional_conditioning=source_unconditional_conditioning)
+
+            # target_ts = torch.full((target_latent.shape[0],), step, device=target_latent.device, dtype=torch.long)
+            # target_dec, _ = self.p_sample_ddim(target_dec, target_cond, target_ts, index=index, use_original_steps=use_original_steps,
+            #                                    unconditional_guidance_scale=target_unconditional_guidance_scale,
+            #                                    unconditional_conditioning=target_unconditional_conditioning)
+            
+            # 2D FFT
+            source_fft = torch.fft.fft2(source_dec.to(torch.float32), dim=(-2, -1))
+            target_fft = torch.fft.fft2(noised_latent.to(torch.float32), dim=(-2, -1))
+
+            source_fft_shift = torch.fft.fftshift(source_fft, dim=(-2, -1))
+            target_fft_shift = torch.fft.fftshift(target_fft, dim=(-2, -1))
+
+            B, C, H, W = source_latent.shape
+            cutoff_ratio = 0.4
+
+            # circular mask
+            y, x = torch.meshgrid(
+                torch.arange(H, device=source_latent.device),
+                torch.arange(W, device=source_latent.device),
+                indexing='ij'
+            )
+
+            cy, cx = H//2, W//2
+            r = torch.sqrt((x - cx)**2 + (y - cy)**2)
+            r_norm = r / r.max()
+            # mask_high = (r_norm >= cutoff_ratio).float()
+            # mask = mask_high[None, None, :, :]
+            mask_low = (r_norm <= cutoff_ratio).float()
+            mask = mask_low[None, None, :, :]
+
+            # phase swap
+            source_mag = source_fft_shift.abs()
+            source_phase = torch.angle(source_fft_shift)
+            target_phase = torch.angle(target_fft_shift)
+            swap_phase = source_phase * (1 - mask) + target_phase * mask
+            swapped_fft_shift = torch.polar(source_mag, swap_phase)
+
+            swapped_fft = torch.fft.ifftshift(swapped_fft_shift, dim=(-2, -1))
+            swapped_dec = torch.fft.ifft2(swapped_fft, dim=(-2, -1)).real
+
+            source_dec = swapped_dec
+
+            # test reconstruction
+            # test_reconstruction_path = "_outputs/reconstruction/"
+            # if not os.path.exists(test_reconstruction_path):
+            #     os.makedirs(test_reconstruction_path, exist_ok=True)
+            # imgs = self.model.decode_first_stage(source_dec) # or target_dec
+            # imgs = torch.clamp((imgs + 1.0) / 2.0, min=0.0, max=1.0)
+            # for j, img in enumerate(imgs):
+            #     img = 255. * rearrange(img.cpu().numpy(), 'c h w -> h w c')
+            #     Image.fromarray(img.astype(np.uint8)).save(os.path.join(test_reconstruction_path, f"{i}_{j}.png"))
+
+        return source_dec

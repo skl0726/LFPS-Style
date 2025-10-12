@@ -57,6 +57,14 @@ def load_img(path):
     return 2.*image - 1.
 
 
+def adain(source_feat, target_feat):
+    source_feat_mean = source_feat.mean(dim=[0, 2, 3], keepdim=True)
+    source_feat_std = source_feat.std(dim=[0, 2, 3], keepdim=True)
+    target_feat_mean = target_feat.mean(dim=[0, 2, 3], keepdim=True)
+    target_feat_std = target_feat.std(dim=[0, 2, 3], keepdim=True)
+    return ((source_feat - source_feat_mean) / source_feat_std) * target_feat_std + target_feat_mean
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -85,6 +93,7 @@ def main():
 
     parser.add_argument(
         "--skip_grid",
+        default=False,
         action='store_true',
         help="do not save a grid, only individual samples. Helpful when evaluating lots of samples",
     )
@@ -140,7 +149,7 @@ def main():
     parser.add_argument(
         "--n_samples",
         type=int,
-        default=2,
+        default=1,
         help="how many samples to produce for each given prompt. A.k.a batch size",
     )
     parser.add_argument(
@@ -193,6 +202,8 @@ def main():
         default="autocast"
     )
 
+    parser.add_argument("--sty-img", type=str, default="_data/sty/sty1.png")
+
     opt = parser.parse_args()
     seed_everything(opt.seed)
 
@@ -224,20 +235,33 @@ def main():
             data = f.read().splitlines()
             data = list(chunk(data, batch_size))
 
-    sample_path = os.path.join(outpath, "samples")
+    # sample_path = os.path.join(outpath, "samples")
+    # os.makedirs(sample_path, exist_ok=True)
+    # base_count = len(os.listdir(sample_path))
+    # grid_count = len(os.listdir(outpath)) - 1
+    sample_path = outpath
     os.makedirs(sample_path, exist_ok=True)
-    base_count = len(os.listdir(sample_path))
-    grid_count = len(os.listdir(outpath)) - 1
 
     assert os.path.isfile(opt.init_img)
     init_image = load_img(opt.init_img).to(device)
     init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
     init_latent = model.get_first_stage_encoding(model.encode_first_stage(init_image))  # move to latent space
 
+    input_basename = os.path.splitext(os.path.basename(opt.init_img))[0]
+
+    ##### sty image
+    assert os.path.isfile(opt.sty_img)
+    sty_image = load_img(opt.sty_img).to(device)
+    sty_image = repeat(sty_image, '1 ... -> b ...', b=batch_size)
+    sty_latent = model.get_first_stage_encoding(model.encode_first_stage(sty_image))
+
     sampler.make_schedule(ddim_num_steps=opt.ddim_steps, ddim_eta=opt.ddim_eta, verbose=False)
 
     assert 0. <= opt.strength <= 1., 'can only work with strength in [0.0, 1.0]'
     t_enc = int(opt.strength * opt.ddim_steps)
+    # ensure t_enc within schedule bounds
+    max_steps = sampler.ddim_timesteps.shape[0] if hasattr(sampler, 'ddim_timesteps') else opt.ddim_steps
+    t_enc = min(t_enc, max_steps)
     print(f"target t_enc is {t_enc} steps")
 
     precision_scope = autocast if opt.precision == "autocast" else nullcontext
@@ -255,33 +279,114 @@ def main():
                             prompts = list(prompts)
                         c = model.get_learned_conditioning(prompts)
 
+                        """
+                        <기존 코드>
+
                         # encode (scaled latent)
                         z_enc = sampler.stochastic_encode(init_latent, torch.tensor([t_enc]*batch_size).to(device))
+                        # z_enc = sampler.ddim_inversion(init_latent,
+                        #                                        cond=model.get_learned_conditioning(batch_size * [""]),
+                        #                                        t_start=t_enc,
+                        #                                        unconditional_guidance_scale=opt.scale,
+                        #                                        unconditional_conditioning=model.get_learned_conditioning(batch_size * [""]))
+
+                        ##### sty image encode
+                        # z_enc_style = sampler.stochastic_encode(sty_latent, torch.tensor([t_enc]*batch_size).to(device))
+                        # z_enc_style = sampler.ddim_inversion(sty_latent,
+                        #                                      cond=model.get_learned_conditioning(batch_size * [""]),
+                        #                                      t_start=t_enc,
+                        #                                      unconditional_guidance_scale=opt.scale,
+                        #                                      unconditional_conditioning=model.get_learned_conditioning(batch_size * [""]))
+                        
+                        # adain (ddim inversion과 더불어 보완하기)
+                        # z_enc = adain(z_enc, z_enc_style)
+
                         # decode it
                         samples = sampler.decode(z_enc, c, t_enc, unconditional_guidance_scale=opt.scale,
                                                  unconditional_conditioning=uc,)
+                        """
+
+
+                        ##### new version
+                        empty_cond = model.get_learned_conditioning(batch_size * [""])
+                        empty_uncond = None
+
+                        z_enc = sampler.stochastic_encode(init_latent, torch.tensor([t_enc]*batch_size).to(device))
+
+                        z_enc_content, noised_latents = sampler.ddim_inversion(
+                            init_latent,
+                            cond=empty_cond,
+                            t_start=t_enc,
+                            unconditional_guidance_scale=opt.scale,
+                            unconditional_conditioning=empty_uncond
+                        )
+
+                        z_enc_style, _ = sampler.ddim_inversion(
+                            sty_latent,
+                            cond=empty_cond,
+                            t_start=t_enc,
+                            unconditional_guidance_scale=opt.scale,
+                            unconditional_conditioning=empty_uncond
+                        )
+
+                        # z_enc = adain(z_enc_content, z_enc_style)
+                        # z_enc = z_enc_content
+
+                        # noised latents visualize
+                        # ddim_inversion_path = "_outputs/ddim_inversion"
+                        # if not os.path.exists(ddim_inversion_path):
+                        #     os.makedirs(ddim_inversion_path, exist_ok=True)
+                        # for i, noised_latent in enumerate(noised_latents):
+                        #     img = model.decode_first_stage(noised_latent)
+                        #     img = torch.clamp((img + 1.0) / 2.0, min=0.0, max=1.0)
+                        #     img = img.squeeze(dim=0)
+                        #     img = 255. * rearrange(img.cpu().numpy(), 'c h w -> h w c')
+                        #     Image.fromarray(img.astype(np.uint8)).save(os.path.join(ddim_inversion_path, f"{i}.png"))
+                        # return
+
+                        samples = sampler.decode_with_fourier(
+                            source_latent=z_enc,
+                            source_cond=c,
+                            source_unconditional_guidance_scale=opt.scale,
+                            source_unconditional_conditioning=uc,
+                            noised_latents=noised_latents,
+                            t_start=t_enc
+                        )
+
 
                         x_samples = model.decode_first_stage(samples)
                         x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
 
                         if not opt.skip_save:
-                            for x_sample in x_samples:
+                            # for x_sample in x_samples:
+                            #     x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                            #     Image.fromarray(x_sample.astype(np.uint8)).save(
+                            #         os.path.join(sample_path, f"{base_count:05}.png"))
+                            #     base_count += 1
+                            for i, x_sample in enumerate(x_samples):
                                 x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                                Image.fromarray(x_sample.astype(np.uint8)).save(
-                                    os.path.join(sample_path, f"{base_count:05}.png"))
-                                base_count += 1
+                                if isinstance(prompts, (list, tuple)):
+                                    prompt_i = prompts[i]
+                                else:
+                                    prompt_i = prompts
+                                filename = f"{input_basename}_{prompt_i}"
+                                if batch_size > 1:
+                                    filename = f"{filename}_{i}"
+                                filename = filename + ".png"
+                                Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, filename))
+
                         all_samples.append(x_samples)
 
-                if not opt.skip_grid:
-                    # additionally, save as grid
-                    grid = torch.stack(all_samples, 0)
-                    grid = rearrange(grid, 'n b c h w -> (n b) c h w')
-                    grid = make_grid(grid, nrow=n_rows)
-
-                    # to image
-                    grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
-                    Image.fromarray(grid.astype(np.uint8)).save(os.path.join(outpath, f'grid-{grid_count:04}.png'))
-                    grid_count += 1
+                # if not opt.skip_grid:
+                #     # additionally, save as grid
+                #     grid = torch.stack(all_samples, 0)
+                #     grid = rearrange(grid, 'n b c h w -> (n b) c h w')
+                #     grid = make_grid(grid, nrow=n_rows)
+ 
+                #     # to image
+                #     grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
+                #     Image.fromarray(grid.astype(np.uint8)).save(os.path.join(outpath, f'grid-{grid_count:04}.png'))
+                #     grid_count += 1
 
                 toc = time.time()
 
@@ -291,3 +396,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+"""
+CUDA_VISIBLE_DEVICES=0 python scripts/img2img.py --prompt "Monochrome Sketching" --init-img "_data/cnt/woman.png" --sty-img "_data/sty/sty4.png" --outdir "_outputs/" --strength 0.8
+
+- style keyword: Pixel, Van Gogh Style, Monochrome Sketching, Cyberpunk, Chinese Ink, Oil Panting, Studio Ghibli, Crayon Painting, LEGO Toy
+"""

@@ -350,3 +350,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+"""
+CUDA_VISIBLE_DEVICES=0 python scripts/txt2img.py --prompt "a photograph of an asian girl" --plms
+"""
