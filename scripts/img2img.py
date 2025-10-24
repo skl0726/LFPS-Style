@@ -204,6 +204,10 @@ def main():
 
     parser.add_argument("--sty-img", type=str, default="_data/sty/sty1.png")
 
+    parser.add_argument("--cutoff_ratio", type=float, default=0.2)
+
+    parser.add_argument("--use_gaussian_filter", action="store_true")
+
     opt = parser.parse_args()
     seed_everything(opt.seed)
 
@@ -329,8 +333,8 @@ def main():
                             unconditional_conditioning=empty_uncond
                         )
 
-                        # z_enc = adain(z_enc_content, z_enc_style)
-                        z_enc = z_enc_content
+                        # z_enc = adain(z_enc_content, z_enc_style) # use adain for making initial noise
+                        # z_enc = z_enc_content                     # use ddim inversion for making initial noise
 
                         # noised latents visualize
                         # ddim_inversion_path = "_outputs/ddim_inversion"
@@ -350,7 +354,9 @@ def main():
                             source_unconditional_guidance_scale=opt.scale,
                             source_unconditional_conditioning=uc,
                             noised_latents=noised_latents,
-                            t_start=t_enc
+                            t_start=t_enc,
+                            use_gaussian_filter=opt.use_gaussian_filter,
+                            cutoff_ratio=opt.cutoff_ratio
                         )
 
 
@@ -400,7 +406,13 @@ if __name__ == "__main__":
 
 
 """
-CUDA_VISIBLE_DEVICES=0 python scripts/img2img.py --prompt "Monochrome Sketching" --init-img "_data/cnt/woman.png" --outdir "_outputs/" --strength 0.8
+CUDA_VISIBLE_DEVICES=0 python scripts/img2img.py \
+--prompt "Oil Panting" \
+--init-img "_data/cnt/woman.png" \
+--outdir "_outputs/" \
+--cutoff_ratio 0.2 \
+--strength 0.8 \
+--use_gaussian_filter # cutoff_ratio of gaussian_filter * 2 ~= cutoff_ratio of ideal filter
 
-- style keyword: Pixel, Van Gogh Style, Monochrome Sketching, Cyberpunk, Chinese Ink, Oil Panting, Studio Ghibli, Crayon Painting, LEGO Toy
+style keyword: Pixel, Van Gogh Style, Monochrome Sketching, Cyberpunk, Chinese Ink, Oil Panting, Studio Ghibli, Crayon Painting, LEGO Toy
 """

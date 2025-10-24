@@ -371,7 +371,9 @@ class DDIMSampler(object):
                             # target_cond=None,
                             # target_unconditional_guidance_scale=None,
                             # target_unconditional_conditioning=None,
-                            use_original_steps=False):
+                            use_original_steps=False,
+                            use_gaussian_filter=True,
+                            cutoff_ratio=0.2):
         timesteps = np.arange(self.ddpm_num_timesteps) if use_original_steps else self.ddim_timesteps
         timesteps = timesteps[:t_start]
 
@@ -405,29 +407,62 @@ class DDIMSampler(object):
             target_fft_shift = torch.fft.fftshift(target_fft, dim=(-2, -1))
 
             B, C, H, W = source_latent.shape
-            cutoff_ratio = 0.0
 
-            # circular mask
-            y, x = torch.meshgrid(
-                torch.arange(H, device=source_latent.device),
-                torch.arange(W, device=source_latent.device),
-                indexing='ij'
-            )
+            def _make_circular_radius(H, W, device):
+                y, x = torch.meshgrid(
+                    torch.arange(H, device=source_latent.device),
+                    torch.arange(W, device=source_latent.device),
+                    indexing='ij'
+                )
+                cy, cx = H // 2, W // 2
+                r = torch.sqrt((x - cx).float()**2 + (y - cy).float()**2)
+                return r
 
-            cy, cx = H//2, W//2
-            r = torch.sqrt((x - cx)**2 + (y - cy)**2)
-            r_norm = r / r.max()
-            # mask_high = (r_norm >= cutoff_ratio).float()
-            # mask = mask_high[None, None, :, :]
-            mask_low = (r_norm <= cutoff_ratio).float()
-            mask = mask_low[None, None, :, :]
+            def _make_gaussian_lowpass_mask(H, W, device, cutoff_ratio):
+                r = _make_circular_radius(H, W, device)
+                sigma = cutoff_ratio * r.max()
+                gaussian_filter = torch.exp(-(r**2) / (2.0 * (sigma**2) + 1e-12))
+                return gaussian_filter
 
-            # phase swap
-            source_mag = source_fft_shift.abs()
+            def _make_butterworth_lowpass_mask(H, W, device, cutoff_ratio, order=2):
+                r = _make_circular_radius(H, W, device)
+                D0 = cutoff_ratio * r.max()
+                butterworth_filter = 1.0 / (1.0 + (r / (D0 + 1e-12))**(2.0 * order))
+                return butterworth_filter
+
+            source_amplitude = source_fft_shift.abs()
             source_phase = torch.angle(source_fft_shift)
             target_phase = torch.angle(target_fft_shift)
-            swap_phase = source_phase * (1 - mask) + target_phase * mask
-            swapped_fft_shift = torch.polar(source_mag, swap_phase)
+            
+            if use_gaussian_filter:
+                mask = _make_gaussian_lowpass_mask(H, W, source_latent.device, cutoff_ratio)[None, None, :, :]
+                # mask = _make_butterworth_lowpass_mask(H, W, source_latent.device, cutoff_ratio)[None, None, :, :]
+
+                # circular mean of low-frequency phase
+                """
+                위상은 원형 값이므로 단순 선형 보간이 위상 wrapping 문제를 일으킬 수 있음 -> 위상을 직접 보간하지 않고 삼각함수로 분해해서 보간
+                (선형 보간할 경우 -pi -> +pi 경계에서 큰 점프가 생겨 불연속 발생)
+                """
+                source_phase_cos = torch.cos(source_phase)
+                source_phase_sin = torch.sin(source_phase)
+                target_phase_cos = torch.cos(target_phase)
+                target_phase_sin = torch.sin(target_phase)
+                mixed_real = source_phase_cos * (1.0 - mask) + target_phase_cos * mask
+                mixed_imag = source_phase_sin * (1.0 - mask) + target_phase_sin * mask
+                mixed_phase = torch.atan2(mixed_imag, mixed_real)
+                swapped_fft_shift = torch.polar(source_amplitude, mixed_phase)
+
+                # if do not use circular mean:
+                # swap_phase = source_phase * (1 - mask) + target_phase * mask
+                # swapped_fft_shift = torch.polar(source_amplitude, swap_phase)
+            else:
+                r = _make_circular_radius(H, W, source_latent.device)
+                r_norm = r / r.max()
+                mask = (r_norm <= cutoff_ratio).float()
+                mask = mask[None, None, :, :]
+
+                swap_phase = source_phase * (1 - mask) + target_phase * mask
+                swapped_fft_shift = torch.polar(source_amplitude, swap_phase)
 
             swapped_fft = torch.fft.ifftshift(swapped_fft_shift, dim=(-2, -1))
             swapped_dec = torch.fft.ifft2(swapped_fft, dim=(-2, -1)).real
